@@ -10,6 +10,9 @@
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs.h>
+extern void ksu_avc_spoof_init(void);
+extern void ksu_avc_spoof_late_init(void);
+extern void ksu_avc_spoof_exit(void);
 #endif
 #include <linux/sched.h>
 
@@ -168,13 +171,13 @@ int __init kernelsu_init(void)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
         pr_alert("*************************************************************");
-        pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
-        pr_alert("**                                                         **");
-        pr_alert("**        X86_FEATURE_INDIRECT_SAFE is not enabled!        **");
-        pr_alert("**      KernelSU will abort initialization to prevent      **");
-        pr_alert("**                     kernel panic.                       **");
-        pr_alert("**                                                         **");
-        pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
+        pr_alert("** NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
+        pr_alert("** **");
+        pr_alert("** X86_FEATURE_INDIRECT_SAFE is not enabled!        **");
+        pr_alert("** KernelSU will abort initialization to prevent      **");
+        pr_alert("** kernel panic.                       **");
+        pr_alert("** **");
+        pr_alert("** NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
         pr_alert("*************************************************************");
         return -ENOSYS;
     }
@@ -205,11 +208,11 @@ int __init kernelsu_init(void)
 
     ksu_init_symbol_resolver();
     ksu_selinux_init();
+    
     ksu_feature_init();
     ksu_sulog_init();
     ksu_adb_root_init();
     ksu_selinux_hide_init();
-
     ksu_supercalls_init();
 
     ksu_setuid_hook_init();
@@ -224,10 +227,18 @@ int __init kernelsu_init(void)
         cache_sid();
         setup_ksu_cred();
 
-        // Grant current process (ksud late-load) root
-        // with KSU SELinux domain before enforcing SELinux, so it
-        // can continue to access /data/app etc. after enforcement.
+#ifdef CONFIG_KSU_SUSFS
+        // do not do escape_to_root_for_init() if SUSFS is enabled, 
+        // to prevent from the bug where device might not boot up with susfs enabled
+#else
         escape_to_root_for_init();
+#endif
+
+#ifdef CONFIG_KSU_SUSFS
+        ksu_sucompat_init();
+        ksu_setuid_hook_init();
+        ksu_avc_spoof_init();
+#endif
 
         ksu_allowlist_init();
         ksu_load_allow_list();
@@ -250,11 +261,14 @@ int __init kernelsu_init(void)
         ksu_hook_init();
 
         ksu_allowlist_init();
-
         ksu_throne_tracker_init();
 
-        ksu_ksud_init();
+#ifdef CONFIG_KSU_SUSFS
+        ksu_avc_spoof_late_init();
+#endif
+        ksu_selinux_hide_drop_backup_if_unused();
 
+        ksu_ksud_init();
         ksu_file_wrapper_init();
     }
 
@@ -271,6 +285,7 @@ void __exit kernelsu_exit(void)
     // Phase 1: Stop all hooks first to prevent new callbacks
     ksu_hook_exit();
     ksu_supercalls_exit();
+    
     if (!ksu_late_loaded)
         ksu_ksud_exit();
 
@@ -279,10 +294,12 @@ void __exit kernelsu_exit(void)
 
     // Phase 2: Now safe to release data structures
     ksu_observer_exit();
-
     ksu_throne_tracker_exit();
-
     ksu_allowlist_exit();
+
+#ifdef CONFIG_KSU_SUSFS
+    ksu_avc_spoof_exit();
+#endif
 
     ksu_selinux_hide_exit();
     ksu_adb_root_exit();
@@ -291,7 +308,7 @@ void __exit kernelsu_exit(void)
 
     if (ksu_cred) {
         put_cred(ksu_cred);
-    }
+    }	
 }
 
 #if NEED_OWN_STACKPROTECTOR

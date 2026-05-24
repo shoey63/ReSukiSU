@@ -69,6 +69,22 @@ void setup_ksu_cred_selinux(void)
     }
 }
 
+void escape_to_root_for_adb_root(void)
+{
+    struct cred *cred = prepare_creds();
+    if (!cred) {
+        pr_err("Failed to prepare adbd's creds!\n");
+        return;
+    }
+
+    if (transive_to_domain(KERNEL_SU_CONTEXT, cred, true)) {
+        pr_err("transive domain failed.\n");
+        abort_creds(cred);
+        return;
+    }
+    commit_creds(cred);
+}
+
 void setenforce(bool enforce)
 {
     __setenforce(enforce);
@@ -165,7 +181,7 @@ void cache_sid(void)
     // compatible with current susfs
     err = security_secctx_to_secid(KERNEL_PRIV_APP_DOMAIN, strlen(KERNEL_PRIV_APP_DOMAIN), &susfs_priv_app_sid);
     if (err) {
-        pr_warn("Failed to cache susfs_priv_app SID: %d\n", err);
+        pr_warn("Failed to cache susfs_priv_app SID: %d\n", susfs_priv_app_sid);
         susfs_priv_app_sid = 0;
     } else {
         pr_info("Cached susfs_priv_app SID: %u\n", susfs_priv_app_sid);
@@ -243,7 +259,48 @@ bool is_init(const struct cred *cred)
 }
 
 #ifdef CONFIG_KSU_SUSFS
-#define KERNEL_PRIV_APP_DOMAIN "u:r:priv_app:s0:c512,c768"
+// KERNEL_PRIV_APP_DOMAIN was defined earlier, so it's not redefined here.
+
+u32 susfs_init_sid = 0;
+u32 susfs_zygote_sid = 0;
+
+static inline void susfs_set_sid(const char *secctx_name, u32 *out_sid)
+{
+    int err;
+    
+    if (!secctx_name || !out_sid) {
+        pr_err("secctx_name || out_sid is NULL\n");
+        return;
+    }
+
+    err = security_secctx_to_secid(secctx_name, strlen(secctx_name), out_sid);
+    if (err) {
+        pr_err("failed setting sid for '%s', err: %d\n", secctx_name, err);
+        return;
+    }
+    pr_info("sid '%u' is set for secctx_name '%s'\n", *out_sid, secctx_name);
+}
+
+bool susfs_is_sid_equal(const struct cred *cred, u32 sid2) {
+    // Lazy initialization for SuSFS SIDs if they are used directly by external files before cache is ready
+    if (unlikely(susfs_zygote_sid == 0)) {
+        security_secctx_to_secid(ZYGOTE_CONTEXT, strlen(ZYGOTE_CONTEXT), &susfs_zygote_sid);
+    }
+    if (unlikely(susfs_init_sid == 0)) {
+        security_secctx_to_secid(INIT_CONTEXT, strlen(INIT_CONTEXT), &susfs_init_sid);
+    }
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+    const struct task_security_struct *tsec = selinux_cred(cred);
+#else
+    const struct cred_security_struct *tsec = selinux_cred(cred);
+#endif
+
+    if (!tsec) {
+        return false;
+    }
+    return tsec->sid == sid2;
+}
 
 u32 susfs_get_sid_from_name(const char *secctx_name)
 {
@@ -281,20 +338,13 @@ bool susfs_is_current_init_domain(void)
 {
     return is_init(current_cred());
 }
-#endif // #ifdef CONFIG_KSU_SUSFS
 
-void escape_to_root_for_adb_root(void)
+void susfs_set_batch_sid(void)
 {
-    struct cred *cred = prepare_creds();
-    if (!cred) {
-        pr_err("Failed to prepare adbd's creds!\n");
-        return;
-    }
-
-    if (transive_to_domain(KERNEL_SU_CONTEXT, cred, true)) {
-        pr_err("transive domain failed.\n");
-        abort_creds(cred);
-        return;
-    }
-    commit_creds(cred);
+    // Re-implement just in case an older SuSFS patch tries to call it directly
+    susfs_set_sid(ZYGOTE_CONTEXT, &susfs_zygote_sid);
+    susfs_set_sid(KERNEL_SU_CONTEXT, &susfs_ksu_sid);
+    susfs_set_sid(INIT_CONTEXT, &susfs_init_sid);
+    susfs_set_sid(KERNEL_PRIV_APP_DOMAIN, &susfs_priv_app_sid);
 }
+#endif

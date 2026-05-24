@@ -311,6 +311,7 @@ bool ksu_uid_should_umount(uid_t uid)
     struct app_profile *profile;
     bool res;
 
+#ifndef CONFIG_KSU_SUSFS
     if (unlikely(ksu_is_manager_uid(uid))) {
         // we should not umount on manager!
         return false;
@@ -319,6 +320,7 @@ bool ksu_uid_should_umount(uid_t uid)
         // we should not umount for webview zygote
         return false;
     }
+#endif
 #ifdef CONFIG_KSU_DISABLE_POLICY
     return !__ksu_is_allow_uid(uid);
 #else

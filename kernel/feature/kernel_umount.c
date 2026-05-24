@@ -126,13 +126,10 @@ static void do_umount_for_current_task()
 
 int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
 {
-    const struct cred *saved;
     struct mount_entry *entry;
+    const struct cred *saved;
 
-    if (!ksu_cred) {
-        return 0;
-    }
-
+#ifndef CONFIG_KSU_SUSFS
     // There are 6 scenarios:
     // 1. Normal app: zygote -> appuid
     // 2. Isolated process forked from zygote: zygote -> isolated_process
@@ -159,6 +156,7 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
     if (!ksu_module_mounted) {
         goto skip_umount_task;
     }
+#endif
 
     // umount the target mnt
     pr_info("handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
@@ -174,7 +172,10 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
 
     revert_creds(saved);
 
+#ifndef CONFIG_KSU_SUSFS
 skip_umount_task:
+#endif
+
     // do susfs setuid when susfs enabled
 #ifdef CONFIG_KSU_SUSFS
     schedule_work(&susfs_extra_works);

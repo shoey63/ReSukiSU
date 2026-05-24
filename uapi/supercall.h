@@ -21,6 +21,14 @@ static const __u32 KERNEL_SU_UAPI_VERSION = 2;
 DEFINE_KSU_UAPI_CONST(__u32, KSU_INSTALL_MAGIC1, 0xDEADBEEF)
 DEFINE_KSU_UAPI_CONST(__u32, KSU_INSTALL_MAGIC2, 0xCAFEBABE)
 
+// Toolkit extensions
+static const __u32 CHANGE_MANAGER_UID = 10006;
+static const __u8 KSU_UMOUNT_GETSIZE = 107;
+static const __u8 KSU_UMOUNT_GETLIST = 108;
+static const __u32 GET_SULOG_DUMP_V2 = 10010;
+static const __u32 CHANGE_KSUVER = 10011;
+static const __u32 CHANGE_SPOOF_UNAME = 10012;
+
 struct ksu_become_daemon_cmd {
     __u8 token[65]; /* Input: daemon token (null-terminated) */
 };

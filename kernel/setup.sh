@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+# Do not change. Ideal for runner
 GKI_ROOT=$(pwd)
 
 display_usage() {

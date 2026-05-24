@@ -5,8 +5,13 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/utsname.h>
+
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
+#include <linux/namei.h>
+#include <linux/susfs.h>
+extern struct work_struct susfs_extra_works;
 #endif
 
 #include <linux/thread_info.h>
@@ -41,8 +46,20 @@
 #include "sulog/fd.h"
 #include "supercall/supercall.h"
 
+#ifndef KERNEL_SU_VERSION_TAG
+#define KERNEL_SU_VERSION_TAG "SuSFS-Mainline"
+#endif
+
+struct ksu_get_hook_mode_cmd {
+    char mode[64];
+};
+
+struct ksu_get_version_tag_cmd {
+    char tag[64];
+};
+
 static int do_grant_root(void __user *arg)
-{
+{	
     int ret;
     // we already checked the uid above in allowed_for_su().
     __u32 audit_uid = ksu_get_uid_t(current_uid());
@@ -165,12 +182,25 @@ static int do_report_event(void __user *arg)
                 susfs_start_sdcard_monitor_fn();
 #endif
             }
+#ifdef CONFIG_KSU_SUSFS
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+            if (!work_pending(&susfs_extra_works)) {
+                schedule_work(&susfs_extra_works);
+            }
+#endif
+            susfs_start_sdcard_monitor_fn();
+#endif
         }
         break;
     }
     case EVENT_MODULE_MOUNTED: {
         pr_info("module mounted!\n");
         on_module_mounted();
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_SUS_PATH)
+        if (!work_pending(&susfs_extra_works)) {
+            schedule_work(&susfs_extra_works);
+        }
+#endif
         break;
     }
     default:
@@ -417,7 +447,7 @@ static int do_set_app_profile(void __user *arg)
     ret = ksu_set_app_profile(&cmd.profile);
     if (!ret) {
         ksu_persistent_allow_list();
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#if !defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KPROBES)
         ksu_mark_running_process();
 #endif
     }
@@ -512,11 +542,19 @@ static int do_manage_mark(void __user *arg)
     case KSU_MARK_GET: {
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK)
         // Get task mark status
+#ifdef CONFIG_KSU_SUSFS
+        if (susfs_is_current_proc_umounted()) {
+            ret = 0; // SYSCALL_TRACEPOINT is NOT flagged
+        } else {
+            ret = 1; // SYSCALL_TRACEPOINT is flagged
+        }
+#else
         ret = ksu_get_task_mark(cmd.pid);
         if (ret < 0) {
             pr_err("manage_mark: get failed for pid %d: %d\n", cmd.pid, ret);
             return ret;
         }
+#endif
         cmd.result = (u32)ret;
 #elif defined(CONFIG_KSU_SUSFS)
         if (susfs_is_current_proc_umounted()) {
@@ -532,7 +570,10 @@ static int do_manage_mark(void __user *arg)
         break;
     }
     case KSU_MARK_MARK: {
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifdef CONFIG_KSU_SUSFS
+        if (cmd.pid != 0)
+            return ret;
+#else
         if (cmd.pid == 0) {
             ksu_mark_all_process();
         } else {
@@ -542,15 +583,14 @@ static int do_manage_mark(void __user *arg)
                 return ret;
             }
         }
-#else
-        if (cmd.pid != 0) {
-            return 0;
-        }
 #endif
         break;
     }
     case KSU_MARK_UNMARK: {
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifdef CONFIG_KSU_SUSFS
+        if (cmd.pid != 0)
+            return ret;
+#else
         if (cmd.pid == 0) {
             ksu_unmark_all_process();
         } else {
@@ -560,19 +600,13 @@ static int do_manage_mark(void __user *arg)
                 return ret;
             }
         }
-#else
-        if (cmd.pid != 0) {
-            return 0;
-        }
 #endif
         break;
     }
     case KSU_MARK_REFRESH: {
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#if !defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KPROBES)
         ksu_mark_running_process();
         pr_info("manage_mark: refreshed running processes\n");
-#else
-        pr_info("manual_hook: cmd: KSU_MARK_REFRESH: do nothing\n");
 #endif
         break;
     }
@@ -806,6 +840,44 @@ static int manage_try_umount(void __user *arg)
     }
 
     } // switch(cmd.mode)
+
+    return 0;
+}
+
+static int do_get_hook_mode(void __user *arg)
+{
+    struct ksu_get_hook_mode_cmd cmd = {0};
+
+#ifndef CONFIG_KSU_SUSFS
+#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+    strscpy(cmd.mode, "Tracepoint", sizeof(cmd.mode));
+#else
+    strscpy(cmd.mode, "Kprobes", sizeof(cmd.mode));
+#endif
+#elif defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) || defined(CONFIG_KPROBES)
+    strscpy(cmd.mode, "Hybrid", sizeof(cmd.mode));
+#else
+    strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
+#endif
+
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        pr_err("get_hook_mode: copy_to_user failed\n");
+        return -EFAULT;
+    }
+
+    return 0;
+}
+
+static int do_get_version_tag(void __user *arg)
+{
+    struct ksu_get_version_tag_cmd cmd = {0};
+
+    strscpy(cmd.tag, KERNEL_SU_VERSION_TAG, sizeof(cmd.tag));
+
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        pr_err("get_version_tag: copy_to_user failed\n");
+        return -EFAULT;
+    }
 
     return 0;
 }

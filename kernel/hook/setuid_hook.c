@@ -2,6 +2,7 @@
 #include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/thread_info.h>
+#include <linux/cred.h>
 #include <linux/seccomp.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -15,6 +16,12 @@
 #include <linux/namei.h>
 
 #include "policy/app_profile.h"
+
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include "selinux/selinux.h"
+#endif
+
 #include "policy/allowlist.h"
 #include "hook/setuid_hook.h"
 #include "klog.h" // IWYU pragma: keep
@@ -26,6 +33,9 @@
 #endif
 #include "compat/kernel_compat.h"
 #include "feature/kernel_umount.h"
+
+extern void disable_seccomp(void);
+extern struct cred *ksu_cred;
 
 static inline void ksu_set_file_immutable(const char *path_name, bool immutable)
 {
@@ -74,6 +84,98 @@ static inline void ksu_set_ksud_status(uid_t new_uid)
         pr_info("Mark /data/adb/ksud read only");
     }
 }
+
+#ifdef CONFIG_KSU_SUSFS
+extern u32 susfs_zygote_sid;
+extern struct work_struct susfs_extra_works;
+
+static inline void ksu_handle_extra_susfs_work(void)
+{
+    if (work_pending(&susfs_extra_works))
+        return;
+
+    schedule_work(&susfs_extra_works);
+}
+
+int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+{
+    // We only interest in process spwaned by zygote
+    if (!susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
+        return 0;
+
+    // Check if spawned process is isolated service first, and force to do umount if so
+    if (is_isolated_process(ruid))
+        goto do_umount;
+
+    // - Since ksu manager app uid is excluded in allow_list_arr, so ksu_uid_should_umount(manager_uid)
+    //   will always return true, that's why we need to explicitly check if new_uid belongs to
+    //   ksu manager.
+    // - Disable seccomp restriction for KSU manager since running with "su" will disable seccomp anyway
+    if (unlikely(ksu_is_manager_uid(ruid))) {
+        pr_info("install fd for ksu manager(uid=%d)\n", ruid);
+        ksu_mark_manager(ruid);
+        ksu_set_ksud_status(ruid);
+        ksu_install_fd();
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+        spin_lock_irq(&current->sighand->siglock);
+        ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+        ksu_set_task_tracepoint_flag(current);
+#endif
+        spin_unlock_irq(&current->sighand->siglock);
+#else
+        disable_seccomp();
+#endif
+        return 0;
+    }
+
+    // we should not umount for webview zygote
+    if (unlikely(ruid == WEBVIEW_ZYGOTE_UID))
+        return 0;
+
+    // Check if spawned process is normal user app and needs to be umounted
+    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid)))
+        goto do_umount;
+
+    if (ksu_is_allow_uid_for_current(ruid)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+        if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {
+            spin_lock_irq(&current->sighand->siglock);
+            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
+            spin_unlock_irq(&current->sighand->siglock);
+        }
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+        ksu_set_task_tracepoint_flag(current);
+#endif
+#else
+        disable_seccomp();
+#endif
+    }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+    else {
+        ksu_clear_task_tracepoint_flag_if_needed(current);
+    }
+#endif
+#endif
+
+    return 0;
+
+do_umount:
+    // Handle kernel umount
+    ksu_handle_umount(ksu_get_uid_t(current_uid()), ruid);
+
+    // Handle extra susfs work
+    ksu_handle_extra_susfs_work();
+
+    // Mark current proc as umounted
+    susfs_set_current_proc_umounted();
+
+    return 0;
+}
+
+#else // !CONFIG_KSU_SUSFS
 
 int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
 {
@@ -147,6 +249,7 @@ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
     return ksu_handle_setuid(ruid, ksu_get_uid_t(current_uid()));
 #endif
 }
+#endif // CONFIG_KSU_SUSFS
 
 void __init ksu_setuid_hook_init(void)
 {

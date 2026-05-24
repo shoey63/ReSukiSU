@@ -6,12 +6,17 @@
 #include <linux/printk.h>
 #include <linux/string.h>
 #include <linux/fs.h>
+#include <linux/types.h>
+#include <linux/jump_label.h>
+
+#include "selinux_hide.h"
+#include "infra/symbol_resolver.h"
+#include "selinux/sepolicy.h"
 #include <asm-generic/errno-base.h>
 #include <net/genetlink.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
-#include <linux/jump_label.h>
 
 // security/selinux/include/security.h
 #include <security.h>
@@ -22,12 +27,11 @@
 
 #include "avc.h"
 #include "klog.h" // IWYU pragma: keep
-#include "linux/kallsyms.h"
 #include "objsec.h"
-#include "hook/patch_memory.h"
 #include "ksu.h"
 #include "policy/feature.h"
 #include "infra/symbol_resolver.h"
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include "hook/lsm_hook_magic.h"
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
@@ -43,6 +47,16 @@
 #define __maybe_static
 #else
 #define __maybe_static static
+#endif
+
+#ifndef KSU_PATCH_TEXT_FLUSH_DCACHE
+#define KSU_PATCH_TEXT_FLUSH_DCACHE 1
+#endif
+
+#ifndef CONFIG_KSU_SUSFS
+// Corrected from lsm_hook.h to lsm_hooks.h
+#include "hook/lsm_hooks.h" 
+#include "hook/patch_memory.h"
 #endif
 
 static DEFINE_MUTEX(selinux_hide_mutex);
@@ -134,6 +148,8 @@ static void ksu_security_compute_av_user(u32 ssid, u32 tsid, u16 tclass, struct 
 
 static write_op_fn *context_write, *access_write;
 static write_op_fn orig_context_write, orig_access_write;
+
+typedef int (*setprocattr_fn)(const char *name, void *value, size_t size);
 
 static ssize_t my_write_context(struct file *file, char *buf, size_t size)
 {
@@ -413,8 +429,7 @@ static void ksu_selinux_hide_unhook()
 {
     int ret;
     if (orig_context_write) {
-        ret =
-            ksu_patch_text(context_write, &orig_context_write, sizeof(orig_context_write), KSU_PATCH_TEXT_FLUSH_DCACHE);
+        ret = ksu_patch_text(context_write, &orig_context_write, sizeof(orig_context_write), KSU_PATCH_TEXT_FLUSH_DCACHE);
         orig_context_write = NULL;
         if (ret) {
             pr_err("selinux_hide: exit: patch_text context_write err: %d\n", ret);
@@ -678,10 +693,14 @@ static int selinux_hide_feature_set(u64 value)
         }
     } else {
         if (ksu_selinux_hide_running) {
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
             ksu_selinux_hide_disable();
+#endif
             ksu_selinux_hide_running = false;
         }
     }
+    pr_info("selinux_hide: ksu_selinux_hide_enabled: %d, ksu_selinux_hide_running: %d\n",
+            ksu_selinux_hide_enabled, ksu_selinux_hide_running);
     mutex_unlock(&selinux_hide_mutex);
     return ret;
 }
@@ -743,16 +762,22 @@ void __exit ksu_selinux_hide_exit()
 {
     mutex_lock(&selinux_hide_mutex);
     if (ksu_selinux_hide_running) {
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
         ksu_selinux_hide_disable();
+#endif
         ksu_selinux_hide_running = false;
     }
     mutex_unlock(&selinux_hide_mutex);
     ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
-    mutex_lock(ksu_selinux_status_lock);
-    if (fake_status)
-        __free_page(fake_status);
-    fake_status = NULL;
-    mutex_unlock(ksu_selinux_status_lock);
+    
+    // Added safety guard: Ensure the lock pointer actually exists before attempting to lock it
+    if (ksu_selinux_status_lock) {
+        mutex_lock(ksu_selinux_status_lock);
+        if (fake_status)
+            __free_page(fake_status);
+        fake_status = NULL;
+        mutex_unlock(ksu_selinux_status_lock);
+    }
 }
 
 void ksu_selinux_hide_drop_backup_if_unused()
@@ -1236,7 +1261,7 @@ static int constraint_expr_eval(struct policydb *policydb, struct context *scont
                 l2 = &(scontext->range.level[1]);
                 goto mls_ops;
             case CEXPR_L2H2:
-                l1 = &(tcontext->range.level[0]);
+                l1 = &(scontext->range.level[0]);
                 l2 = &(tcontext->range.level[1]);
                 goto mls_ops;
             mls_ops:

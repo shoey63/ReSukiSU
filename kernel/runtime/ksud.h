@@ -23,6 +23,11 @@ struct user_arg_ptr {
 };
 
 void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags);
+
+#ifdef CONFIG_KSU_SUSFS
+void ksu_handle_sys_read(unsigned int fd);
+#endif
+
 void ksu_execve_hook_ksud(const struct pt_regs *regs);
 void ksu_stop_ksud_execve_hook(void);
 void ksu_stop_input_hook_runtime(void);

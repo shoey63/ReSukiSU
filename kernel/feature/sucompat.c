@@ -13,17 +13,21 @@
 #include <linux/types.h>
 #include <linux/ptrace.h>
 #include <linux/namei.h>
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 #include <linux/sched/task_stack.h>
 #else
 #include <linux/sched.h>
 #endif
 
+#include <linux/jump_label.h>
+
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
-#include <linux/namei.h>
+#include <linux/minmax.h>
 #include "selinux/selinux.h"
 #include "objsec.h"
+#include "runtime/ksud.h"
 #endif // #ifdef CONFIG_KSU_SUSFS
 
 #include "compat/kernel_compat.h"
@@ -119,23 +123,21 @@ static void __user *userspace_stack_buffer(const void *d, size_t len)
 
 static char __user *sh_user_path(void)
 {
-    static const char sh_path[] = "/system/bin/sh";
+	static const char sh_path_local[] = "/system/bin/sh";
 
-    return userspace_stack_buffer(sh_path, sizeof(sh_path));
+	return userspace_stack_buffer(sh_path_local, sizeof(sh_path_local));
 }
 
 static char __user *ksud_user_path(void)
 {
-    static const char ksud_path[] = KSUD_PATH;
+	static const char ksud_path_local[] = KSUD_PATH;
 
-    return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
+	return userspace_stack_buffer(ksud_path_local, sizeof(ksud_path_local));
 }
 
 static const char sh_path[] = SH_PATH;
 static const char su_path[] = SU_PATH;
 static const char ksud_path[] = KSUD_PATH;
-
-extern bool ksu_kernel_umount_enabled;
 
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
 
@@ -250,6 +252,35 @@ extern struct static_key_true ksud_execve_key;
 extern bool ksud_execve_key;
 #endif
 
+#ifdef CONFIG_KSU_SUSFS
+static bool ksu_str_ends_with(const char *str, size_t str_len, const char *suffix)
+{
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > str_len)
+        return false;
+    return memcmp(str + str_len - suffix_len, suffix, suffix_len) == 0;
+}
+
+static bool ksu_is_zygote_or_adbd(const char *name, size_t len)
+{
+    if (len < 5)
+        return false;
+
+    // Fast-path: Check last character first to skip 99% of processes
+    char last = name[len - 1];
+    if (last == 'd')
+        return ksu_str_ends_with(name, len, "/adbd");
+    if (last == 's')
+        return ksu_str_ends_with(name, len, "/app_process");
+    if (last == '2')
+        return ksu_str_ends_with(name, len, "/app_process32");
+    if (last == '4')
+        return ksu_str_ends_with(name, len, "/app_process64");
+
+    return false;
+}
+#endif
+
 static inline void ksu_handle_execveat_init(const char *filename, void *envp)
 {
     if (current->pid != 1 && is_init(current_cred())) {
@@ -257,7 +288,13 @@ static inline void ksu_handle_execveat_init(const char *filename, void *envp)
             pr_info("hook_manager: escape to root for init executing ksud: %d\n", current->pid);
             escape_to_root_for_init();
         }
-#if !defined(CONFIG_KSU_TRACEPOINT_HOOK)
+#ifdef CONFIG_KSU_SUSFS
+        else if (likely(!ksu_is_zygote_or_adbd(filename, strlen(filename))) &&
+                 !susfs_is_current_proc_umounted()) {
+            pr_info("susfs: mark no sucompat checks for pid: '%d', exec: '%s'\n", current->pid, filename);
+            susfs_set_current_proc_umounted();
+        }
+#elif !defined(CONFIG_KSU_TRACEPOINT_HOOK)
         else if (likely(strstr(filename, "/app_process") == NULL && strstr(filename, "/adbd") == NULL) &&
                  !ksu_is_current_proc_umounted()) {
             pr_info("mark no sucompat checks for pid: '%d', exec: '%s'\n", current->pid, filename);

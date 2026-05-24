@@ -37,13 +37,22 @@
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
+#define ksu_handle_sys_read ksu_handle_sys_read_susfs
 #include "ksud.h"
+#undef ksu_handle_sys_read
 #include "ksud_boot.h"
 #include "compat/kernel_compat.h"
 #include "selinux/selinux.h"
 #include "manager/throne_tracker.h"
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
 #include "hook/syscall_hook.h"
+#endif
+
+#include "linux/jump_label.h"
+
+#ifdef CONFIG_KSU_SUSFS
+DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
+DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
 #endif
 
 // clang-format off
@@ -96,9 +105,6 @@ static void stop_execve_hook(void);
         pr_info("unregister input kprobe: %d!\n", ret);
     }
 #elif defined(CONFIG_KSU_SUSFS)
-    DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
-    DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
-
     // use define to avoid ifdef
     #define ksu_init_rc_hook_inactive() (!static_branch_likely(&ksu_is_init_rc_hook_enabled))
     #define ksu_input_hook_inactive() (!static_branch_likely(&ksu_is_input_hook_enabled))
@@ -171,7 +177,9 @@ static void stop_execve_hook(void);
 #endif
 // clang-format on
 
-static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
+//static struct work_struct stop_input_hook_work;
+
+static const char __user *get_user_arg_ptr_local(struct user_arg_ptr argv, int nr)
 {
     const char __user *native;
 
@@ -207,7 +215,7 @@ static int __maybe_unused count(struct user_arg_ptr argv, int max)
 
     if (argv.ptr.native != NULL) {
         for (;;) {
-            const char __user *p = get_user_arg_ptr(argv, i);
+            const char __user *p = get_user_arg_ptr_local(argv, i);
 
             if (!p)
                 break;
@@ -235,18 +243,23 @@ static bool check_argv(struct user_arg_ptr argv, int index, const char *expected
     if (argc <= index)
         return false;
 
-    p = get_user_arg_ptr(argv, index);
+    p = get_user_arg_ptr_local(argv, index);
     if (!p || IS_ERR(p))
         goto fail;
 
+#ifdef CONFIG_KSU_SUSFS
+    if (strncpy_from_user(buf, p, buf_len) <= 0)
+        goto fail;
+#else
     if (ksu_strncpy_from_user_nofault(buf, p, buf_len) <= 0)
         goto fail;
+#endif
 
     buf[buf_len - 1] = '\0';
+
     return !strcmp(buf, expected);
 
 fail:
-    pr_err("check_argv failed\n");
     return false;
 }
 
@@ -298,7 +311,7 @@ void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, s
             if (envc > 0) {
                 int n;
                 for (n = 1; n <= envc; n++) {
-                    const char __user *p = get_user_arg_ptr(*envp, n);
+                    const char __user *p = get_user_arg_ptr_local(*envp, n);
                     if (!p || IS_ERR(p)) {
                         continue;
                     }
@@ -450,7 +463,6 @@ static void free_module_rc(void)
 // https://cs.android.com/android/platform/superproject/main/+/main:system/libbase/file.cpp;l=241-243;drc=61197364367c9e404c7da6900658f1b16c42d0da
 // The system will read init.rc file until EOF, whenever read() returns 0,
 // so we begin append ksu rc when we meet EOF.
-
 static ssize_t read_proxy(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
     ssize_t ret = 0;
@@ -780,6 +792,15 @@ int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_pt
 #endif
 }
 
+#ifdef CONFIG_KSU_SUSFS
+void ksu_handle_sys_read_susfs(unsigned int fd)
+{
+#ifndef CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+    ksu_handle_sys_read_fd(fd);
+#endif
+}
+#endif
+
 static unsigned int volumedown_pressed_count = 0;
 
 static bool is_volumedown_enough(unsigned int count)
@@ -922,6 +943,16 @@ void ksu_stop_ksud_execve_hook(void)
 }
 #endif
 
+void ksu_stop_input_hook_runtime(void)
+{
+    static bool input_hook_stopped = false;
+    if (input_hook_stopped) {
+        return;
+    }
+    input_hook_stopped = true;
+    stop_input_hook();
+}
+
 bool ksu_is_safe_mode()
 {
     static bool safe_mode = false;
@@ -972,17 +1003,23 @@ void ksu_execve_hook_ksud(const struct pt_regs *regs)
         return;
     }
 
+#ifdef CONFIG_KSU_SUSFS
+    // Not supported in hook mode for SuSFS
+#else
     ksu_handle_execveat_ksud(path, &argv, NULL, NULL);
+#endif
 }
 
+#ifndef CONFIG_KSU_SUSFS
 static long (*orig_sys_read)(const struct pt_regs *regs);
 static long ksu_sys_read(const struct pt_regs *regs)
 {
     unsigned int fd = PT_REGS_PARM1(regs);
-    char __user **buf_ptr = (char __user **)&PT_REGS_PARM2(regs);
-    size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
 
-    ksu_handle_sys_read(fd, buf_ptr, count_ptr);
+#ifndef CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+    ksu_handle_sys_read_fd(fd);
+#endif
+
     return orig_sys_read(regs);
 }
 
@@ -1045,20 +1082,13 @@ static void do_stop_input_hook(struct work_struct *work)
 }
 #endif
 
-void ksu_stop_input_hook_runtime(void)
-{
-    static bool input_hook_stopped = false;
-    if (input_hook_stopped) {
-        return;
-    }
-    input_hook_stopped = true;
-    stop_input_hook();
-}
+#endif
 
 // ksud: module support
 void __init ksu_ksud_init(void)
 {
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifndef CONFIG_KSU_SUSFS
     int ret;
 
     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
@@ -1069,6 +1099,7 @@ void __init ksu_ksud_init(void)
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
 #endif
+#endif
 #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
     vol_detector_init();
 #endif
@@ -1077,10 +1108,12 @@ void __init ksu_ksud_init(void)
 void __exit ksu_ksud_exit(void)
 {
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifndef CONFIG_KSU_SUSFS
     // TODO:
     // this should be done before unregister vfs_read_kp
     // stop_init_rc_hook();
     unregister_kprobe(&input_event_kp);
+#endif
 #endif
 
 #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK

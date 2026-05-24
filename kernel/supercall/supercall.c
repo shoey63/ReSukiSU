@@ -9,6 +9,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/utsname.h>
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/namei.h>
@@ -20,6 +21,15 @@
 #include "supercall/internal.h"
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
+#include "manager/manager_identity.h"
+
+#include "linux/jump_label.h"
+
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_SPOOF_UNAME)
+extern struct static_key_false susfs_is_uname_spoof_buffer_set;
+#endif
+
+uint32_t ksuver_override = 0;
 
 static int anon_ksu_release(struct inode *inode, struct file *filp)
 {
@@ -128,8 +138,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
     return 0;
 }
 
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
-// Reboot hook for installing fd
+#if !defined(CONFIG_KSU_SUSFS) && !defined(CONFIG_KSU_TRACEPOINT_HOOK)
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     struct pt_regs *real_regs = PT_REAL_REGS(regs);
@@ -150,11 +159,13 @@ static struct kprobe reboot_kp = {
 
 void __init ksu_supercalls_init(void)
 {
+#if !defined(CONFIG_KSU_SUSFS) && !defined(CONFIG_KSU_TRACEPOINT_HOOK)
     int rc;
+#endif
 
     ksu_supercall_dump_commands();
 
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#if !defined(CONFIG_KSU_SUSFS) && !defined(CONFIG_KSU_TRACEPOINT_HOOK)
     rc = register_kprobe(&reboot_kp);
     if (rc) {
         pr_err("reboot kprobe failed: %d\n", rc);
@@ -166,7 +177,7 @@ void __init ksu_supercalls_init(void)
 
 void __exit ksu_supercalls_exit(void)
 {
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#if !defined(CONFIG_KSU_SUSFS) && !defined(CONFIG_KSU_TRACEPOINT_HOOK)
     unregister_kprobe(&reboot_kp);
 #endif
     ksu_supercall_cleanup_state();

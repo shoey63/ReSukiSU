@@ -1,12 +1,12 @@
 menu "KernelSU"
 
 config KSU
-	  tristate "KernelSU function support"
-      select KALLSYMS
-	  default y
-	  help
-		Enable kernel-level root privileges on Android System.
-		Choose "m" here to build KernelSU as LKM
+	tristate "KernelSU function support"
+	select KALLSYMS
+	default y
+	help
+	  Enable kernel-level root privileges on Android System.
+	  Choose "m" here to build KernelSU as LKM.
 
 config KSU_DEBUG
 	  bool "KernelSU debug mode"
@@ -72,7 +72,7 @@ config KSU_MULTI_MANAGER_SUPPORT
 choice
 	prompt "KernelSU Hooking Method"
 	depends on KSU
-	default KSU_TRACEPOINT_HOOK
+	default KSU_SUSFS
 	help
 	  Select the hooking method for KernelSU.
 	  Note: Tracepoint Syscall Redirect hook is only supported for GKI2(5.10+)

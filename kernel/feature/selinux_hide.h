@@ -1,5 +1,6 @@
 #ifndef __KSU_H_SELINUX_HIDE
 #define __KSU_H_SELINUX_HIDE
+
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/sched.h>
@@ -19,6 +20,10 @@ int ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size);
 typedef int (*setprocattr_fn)(struct task_struct *p, char *name, void *value, size_t size);
 
 int ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS
+extern bool ksu_selinux_hide_running;
 #endif
 
 #endif

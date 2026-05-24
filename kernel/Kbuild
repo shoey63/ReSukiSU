@@ -8,6 +8,7 @@ kernelsu-objs += feature/sulog.o
 kernelsu-objs += feature/adb_root.o
 kernelsu-objs += feature/selinux_hide.o
 kernelsu-objs += hook/setuid_hook.o
+kernelsu-objs += extras.o
 
 ifndef CONFIG_KSU_DISABLE_MANAGER
 kernelsu-objs += feature/dynamic_manager.o
@@ -62,9 +63,8 @@ LOCAL_GIT_EXISTS := $(shell test -e $(KSU_SRC)/../.git && echo 1 || echo 0)
 
 ifeq ($(LOCAL_GIT_EXISTS),0)
 $(info -- Can't find $(REPO_NAME) git submodule!)
-$(info -- If you are using bazel to build this kernel,)
-$(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
-$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
+$(info -- Bazel strict sandbox detected. Bypassing $(REPO_NAME) git checks...)
+# $(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
 endif
 
 ifdef KBUILD_EXTMOD
@@ -77,9 +77,9 @@ KSU_VERSION := $(shell expr 30000 + $(KSU_LOCAL_VERSION) + 700)
 
 KSU_TAG_NAME    := $(shell cd $(KSU_SRC); $(GIT_BIN) describe --abbrev=0 --tags 2>/dev/null || echo "v4.1.0")
 KSU_COMMIT_SHA  := $(shell cd $(KSU_SRC); $(GIT_BIN) rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
-ifneq ($(shell cd $(KSU_SRC); $(GIT_BIN) diff-index --quiet HEAD; echo $$?),0)
-KSU_COMMIT_SHA  := $(KSU_COMMIT_SHA)-dirty
-endif
+#ifneq ($(shell cd $(KSU_SRC); $(GIT_BIN) diff-index --quiet HEAD; echo $$?),0)
+#KSU_COMMIT_SHA  := $(KSU_COMMIT_SHA)-dirty
+#endif
 KSU_BRANCH_NAME := $(shell cd $(KSU_SRC); $(GIT_BIN) branch --show-current 2>/dev/null || echo "unknown")
 
 # call subst to process placeholders
@@ -175,6 +175,7 @@ else ifdef CONFIG_KSU_MANUAL_HOOK
   $(info -- $(REPO_NAME): using Manual Hook)
   include $(KSU_SRC)/tools/manual_hook_check.mk
 else ifdef CONFIG_KSU_SUSFS
+ccflags-y += -DCONFIG_KSU_SUSFS=1
   $(info -- $(REPO_NAME): using SuSFS Inline hook)
   include $(KSU_SRC)/tools/inline_hook_check.mk
   include $(KSU_SRC)/tools/susfs_compat.mk
