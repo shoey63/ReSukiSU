@@ -15,6 +15,8 @@ bool allowed_for_su(void);
 long ksu_supercall_handle_ioctl(unsigned int cmd, void __user *argp);
 void ksu_supercall_dump_commands(void);
 void ksu_supercall_cleanup_state(void);
+int ksu_handle_toolkit_reboot(int magic2, unsigned int cmd, void __user *arg);
+void ksu_toolkit_uname_reset(void);
 
 // sys_reboot extensions
 #define CHANGE_MANAGER_UID 10006 // change ksu manager appid
