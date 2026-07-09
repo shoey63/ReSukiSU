@@ -18,6 +18,10 @@
 #include "compat/kernel_compat.h"
 #include "uapi/supercall.h"
 #include "supercall/internal.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+extern int ksu_handle_susfs_cmd(unsigned int cmd, void __user **arg);
+#endif
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
 
@@ -90,6 +94,11 @@ extern int ksu_handle_susfs_cmd(unsigned int cmd, void __user **arg);
 // downstream: make sure to pass arg as reference, this can allow us to extend things.
 int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg)
 {
+#ifdef CONFIG_KSU_SUSFS
+    if (magic2 == 0x53555346) { /* SUSFS_MAGIC */
+        return ksu_handle_susfs_cmd((unsigned int)cmd, arg);
+    }
+#endif
     if (magic1 != KSU_INSTALL_MAGIC1)
         return -EINVAL;
 

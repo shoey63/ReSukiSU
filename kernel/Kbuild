@@ -64,7 +64,6 @@ ifeq ($(LOCAL_GIT_EXISTS),0)
 $(info -- Can't find $(REPO_NAME) git submodule!)
 $(info -- If you are using bazel to build this kernel,)
 $(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
-$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
 endif
 
 ifdef KBUILD_EXTMOD
@@ -237,3 +236,30 @@ $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
 endif
 
 # Keep a new line here!! Because someone may append config
+
+# --- Injected from KernelSU-Next SuSFS Patch ---
+ifndef KSU_NEXT_MANAGER_LIST
+KSU_NEXT_MANAGER_LIST := 0x3e6:79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7,0x338:f26471a28031130362bce7eebffb9a0b8afc3095f163ce0c75a309f03b644a1f
+endif
+ccflags-y += -DKSU_NEXT_MANAGER_LIST=\"$(KSU_NEXT_MANAGER_LIST)\"
+ccflags-y += -DKSU_NEW_DCACHE_FLUSH=1
+
+# --- BAZEL C-MACRO FIX ---
+ifeq ($(strip $(CONFIG_KSU_SUSFS)),y)
+ccflags-y += -DCONFIG_KSU_SUSFS=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_PATH=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MOUNT=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_KSTAT=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_UNAME=1
+ccflags-y += -DCONFIG_KSU_SUSFS_ENABLE_LOG=1
+ccflags-y += -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=1
+ccflags-y += -DCONFIG_KSU_SUSFS_OPEN_REDIRECT=1
+ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MAP=1
+endif
+
+# --- BAZEL VMLINUX LINKER FIX ---
+ifeq ($(strip $(CONFIG_KSU_SUSFS)),y)
+kernelsu-objs += feature/selinux_hide.o
+kernelsu-objs += extras.o
+endif

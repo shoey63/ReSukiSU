@@ -34,6 +34,11 @@
 #include "feature/sucompat.h"
 #include "feature/selinux_hide.h"
 #include "infra/symbol_resolver.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+extern void ksu_avc_spoof_late_init(void);
+extern void ksu_avc_spoof_exit(void);
+#endif
 
 #ifdef CONFIG_ARM64
 #include "compat/apatch_conflict.h"
@@ -155,6 +160,9 @@ module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
 int __init kernelsu_init(void)
 {
+    #ifdef CONFIG_KSU_SUSFS
+    susfs_init();
+#endif
     pr_info("Initialized on: %s (%s) with driver version: %u\n", UTS_RELEASE, UTS_MACHINE, KSU_VERSION);
 
 #ifdef MODULE
@@ -241,6 +249,9 @@ int __init kernelsu_init(void)
         ksu_boot_completed = true;
         track_throne(TRACK_THRONE_FORCE_SEARCH_MGR);
 
+        #ifdef CONFIG_KSU_SUSFS
+        ksu_avc_spoof_late_init();
+#endif
         if (!getenforce()) {
             pr_info("Permissive SELinux, enforcing\n");
             setenforce(true);
@@ -288,6 +299,9 @@ void __exit kernelsu_exit(void)
     ksu_adb_root_exit();
     ksu_sulog_exit();
     ksu_feature_exit();
+#ifdef CONFIG_KSU_SUSFS
+    ksu_avc_spoof_exit();
+#endif
 
     if (ksu_cred) {
         put_cred(ksu_cred);

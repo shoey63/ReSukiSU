@@ -72,7 +72,7 @@ config KSU_MULTI_MANAGER_SUPPORT
 choice
 	prompt "KernelSU Hooking Method"
 	depends on KSU
-	default KSU_TRACEPOINT_HOOK
+	default KSU_SUSFS
 	help
 	  Select the hooking method for KernelSU.
 	  Note: Tracepoint Syscall Redirect hook is only supported for GKI2(5.10+)
