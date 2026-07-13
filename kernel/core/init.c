@@ -10,6 +10,9 @@
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs.h>
+#include "hook/setuid_hook.h"
+#include "feature/sucompat.h"
+extern void ksu_avc_spoof_late_init(void);
 #endif
 #include <linux/sched.h>
 
@@ -27,7 +30,6 @@
 #include "selinux/selinux.h"
 #include "hook/setuid_hook.h"
 #include "compat/kernel_compat.h"
-
 #include "feature/sulog.h"
 #include "feature/adb_root.h"
 #include "feature/dynamic_manager.h"
@@ -41,10 +43,12 @@
 
 // if we are using the upstream hook, check x86-64 compatible
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(__x86_64__)
+#ifndef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
 #include <asm/cpufeature.h>
 #include <linux/version.h>
 #ifndef X86_FEATURE_INDIRECT_SAFE
 #error "FATAL: Your kernel is missing the indirect syscall bypass patches!"
+#endif
 #endif
 #endif
 
@@ -55,7 +59,7 @@
 // while those third-party kernel can't provide.
 // Thus, we manually provide it instead of using kernel's
 #if defined(CONFIG_STACKPROTECTOR) &&                                                                                  \
-    (defined(CONFIG_ARM64) && defined(MODULE) && !defined(CONFIG_STACKPROTECTOR_PER_TASK))
+        (defined(CONFIG_ARM64) && defined(MODULE) && !defined(CONFIG_STACKPROTECTOR_PER_TASK))
 #include <linux/stackprotector.h>
 #include <linux/random.h>
 unsigned long __stack_chk_guard __ro_after_init __attribute__((visibility("hidden")));
@@ -103,7 +107,6 @@ static inline void __init ksu_hook_init(void)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     ksu_lsm_hook_magic_init();
 #endif
-
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK)
     ksu_syscall_hook_init();
     ksu_syscall_hook_manager_init();
@@ -127,7 +130,6 @@ static inline void __exit ksu_hook_exit(void)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     ksu_lsm_hook_magic_exit();
 #endif
-
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK)
     ksu_syscall_hook_manager_exit();
 #else
@@ -156,7 +158,6 @@ module_param_named(norc, ksu_no_custom_rc, bool, 0);
 int __init kernelsu_init(void)
 {
     pr_info("Initialized on: %s (%s) with driver version: %u\n", UTS_RELEASE, UTS_MACHINE, KSU_VERSION);
-
 #ifdef MODULE
     ksu_late_loaded = (current->pid != 1);
 #else
@@ -164,7 +165,7 @@ int __init kernelsu_init(void)
 #endif
 
     // If we are in tracepoint hook, remember to check x86-64 compatible
-#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(__x86_64__)
+#if defined(CONFIG_KSU_TRACEPOINT_HOOK) && defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
         pr_alert("*************************************************************");
@@ -182,11 +183,11 @@ int __init kernelsu_init(void)
 
 #ifdef CONFIG_KSU_DEBUG
     pr_alert("*************************************************************");
-    pr_alert("**	 NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE	**");
-    pr_alert("**														 **");
-    pr_alert("**		 You are running KernelSU in DEBUG mode		  **");
-    pr_alert("**														 **");
-    pr_alert("**	 NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE	**");
+    pr_alert("**         NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE     **");
+    pr_alert("**                                              **");
+    pr_alert("**                 You are running KernelSU in DEBUG mode                 **");
+    pr_alert("**                                              **");
+    pr_alert("**         NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE     **");
     pr_alert("*************************************************************");
 #endif
 
@@ -214,6 +215,9 @@ int __init kernelsu_init(void)
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
+#ifdef CONFIG_KSU_SUSFS
+#endif
+
     if (ksu_late_loaded) {
         // This way are only happen when tracepoint+lkm
         // so we use ifdef MODULE there to avoid manual hook compile failed
@@ -240,6 +244,11 @@ int __init kernelsu_init(void)
 
         ksu_boot_completed = true;
         track_throne(TRACK_THRONE_FORCE_SEARCH_MGR);
+        
+#ifdef CONFIG_KSU_SUSFS
+        ksu_avc_spoof_late_init();
+#endif
+        ksu_selinux_hide_drop_backup_if_unused();
 
         if (!getenforce()) {
             pr_info("Permissive SELinux, enforcing\n");
@@ -250,11 +259,9 @@ int __init kernelsu_init(void)
         ksu_hook_init();
 
         ksu_allowlist_init();
-
         ksu_throne_tracker_init();
 
         ksu_ksud_init();
-
         ksu_file_wrapper_init();
     }
 
@@ -279,10 +286,12 @@ void __exit kernelsu_exit(void)
 
     // Phase 2: Now safe to release data structures
     ksu_observer_exit();
-
     ksu_throne_tracker_exit();
 
     ksu_allowlist_exit();
+
+#ifdef CONFIG_KSU_SUSFS
+#endif
 
     ksu_selinux_hide_exit();
     ksu_adb_root_exit();

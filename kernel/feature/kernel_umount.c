@@ -110,7 +110,7 @@ void try_umount(const char *mnt, int flags)
 extern struct work_struct susfs_extra_works;
 #endif
 
-static void do_umount_for_current_task()
+static void do_umount_for_current_task(void)
 {
     const struct cred *saved = override_creds(ksu_cred);
     struct mount_entry *entry;
@@ -184,6 +184,8 @@ skip_umount_task:
     return 0;
 }
 
+// kernel_umount: when a process is setuid, if it is an app, we umount all modules
+// for it.
 void __init ksu_kernel_umount_init(void)
 {
     if (ksu_register_feature_handler(&kernel_umount_handler)) {

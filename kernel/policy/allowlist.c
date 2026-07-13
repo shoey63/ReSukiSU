@@ -53,7 +53,7 @@ static DEFINE_MUTEX(allowlist_mutex);
 static struct root_profile default_root_profile;
 static struct non_root_profile default_non_root_profile;
 
-static void __init init_default_profiles()
+static void __init init_default_profiles(void)
 {
     kernel_cap_t full_cap = CAP_FULL_SET;
 
@@ -311,6 +311,7 @@ bool ksu_uid_should_umount(uid_t uid)
     struct app_profile *profile;
     bool res;
 
+#ifndef CONFIG_KSU_SUSFS
     if (unlikely(ksu_is_manager_uid(uid))) {
         // we should not umount on manager!
         return false;
@@ -319,6 +320,8 @@ bool ksu_uid_should_umount(uid_t uid)
         // we should not umount for webview zygote
         return false;
     }
+#endif
+
 #ifdef CONFIG_KSU_DISABLE_POLICY
     return !__ksu_is_allow_uid(uid);
 #else
@@ -409,7 +412,6 @@ bool ksu_get_allow_list(int *array, u16 length, u16 *out_length, u16 *out_total,
     int iter;
     rcu_read_lock();
     hash_for_each_rcu (allow_list, iter, p, list) {
-        // pr_info("get_allow_list uid: %d allow: %d\n", p->uid, p->allow);
         if (p->profile.allow_su == allow && !ksu_is_manager_uid(p->profile.curr_uid)) {
             if (j < length) {
                 array[j++] = p->profile.curr_uid;

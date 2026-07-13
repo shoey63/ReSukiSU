@@ -4,11 +4,11 @@
 #include <linux/version.h>
 #include <linux/sched.h>
 
-void ksu_selinux_hide_init();
-void ksu_selinux_hide_exit();
-void ksu_selinux_hide_drop_backup_if_unused();
-void ksu_selinux_hide_handle_second_stage();
-void ksu_selinux_hide_handle_post_fs_data();
+void ksu_selinux_hide_init(void);
+void ksu_selinux_hide_exit(void);
+void ksu_selinux_hide_drop_backup_if_unused(void);
+void ksu_selinux_hide_handle_second_stage(void);
+void ksu_selinux_hide_handle_post_fs_data(void);
 
 // https://github.com/torvalds/linux/commit/b21507e272627c434e8dd74e8d51fd8245281b59
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
@@ -20,5 +20,18 @@ typedef int (*setprocattr_fn)(struct task_struct *p, char *name, void *value, si
 
 int ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size);
 #endif
+
+extern bool ksu_selinux_hide_running;
+extern bool ksu_selinux_hide_enabled;
+extern void initialize_fake_status(void);
+
+struct page;
+extern struct page *fake_status;
+
+struct static_key_false;
+extern struct static_key_false fake_status_initialize_key;
+
+struct selinux_state;
+extern struct selinux_state fake_state;
 
 #endif

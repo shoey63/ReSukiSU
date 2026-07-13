@@ -11,18 +11,43 @@
  * Cached SID values for frequently checked contexts.
  * These are resolved once at init and used for fast u32 comparison
  * instead of expensive string operations on every check.
- *
- * A value of 0 means "no cached SID is available" for that context.
- * This covers both the initial "not yet cached" state and any case
- * where resolving the SID (e.g. via security_secctx_to_secid) failed.
- * In all such cases we intentionally fall back to the slower
- * string-based comparison path; this degrades performance only and
- * does not cause a functional failure.
  */
 static u32 cached_su_sid __read_mostly = 0;
 static u32 cached_zygote_sid __read_mostly = 0;
 static u32 cached_init_sid __read_mostly = 0;
 u32 ksu_file_sid __read_mostly = 0;
+
+#ifdef CONFIG_KSU_SUSFS
+u32 susfs_ksu_sid __read_mostly = 0;
+u32 susfs_init_sid __read_mostly = 0;
+u32 susfs_zygote_sid __read_mostly = 0;
+u32 susfs_priv_app_sid __read_mostly = 0;
+#define KERNEL_PRIV_APP_DOMAIN "u:r:priv_app:s0:c512,c768"
+#endif
+
+/*
+ * GKI2 Polyfill: struct lsm_context was introduced in newer kernels (6.6+).
+ * We define it locally for older kernels to maintain a unified source base.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
+struct lsm_context {
+    char *context;
+    u32 len;
+};
+
+static inline int __security_secid_to_secctx(u32 secid, struct lsm_context *cp)
+{
+    return security_secid_to_secctx(secid, &cp->context, &cp->len);
+}
+
+static inline void __security_release_secctx(struct lsm_context *cp)
+{
+    security_release_secctx(cp->context, cp->len);
+}
+#else
+#define __security_secid_to_secctx security_secid_to_secctx
+#define __security_release_secctx security_release_secctx
+#endif
 
 static int transive_to_domain(const char *domain, struct cred *cred, bool clear_exec_sid)
 {
@@ -69,6 +94,22 @@ void setup_ksu_cred_selinux(void)
     }
 }
 
+void escape_to_root_for_adb_root(void)
+{
+    struct cred *cred = prepare_creds();
+    if (!cred) {
+        pr_err("Failed to prepare adbd's creds!\n");
+        return;
+    }
+
+    if (transive_to_domain(KERNEL_SU_CONTEXT, cred, true)) {
+        pr_err("transive domain failed.\n");
+        abort_creds(cred);
+        return;
+    }
+    commit_creds(cred);
+}
+
 void setenforce(bool enforce)
 {
     __setenforce(enforce);
@@ -90,34 +131,8 @@ bool getenforce(void)
 static inline u32 current_sid(void)
 {
     const struct task_security_struct *tsec = current_security();
-
     return tsec->sid;
 }
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
-struct lsm_context {
-    char *context;
-    u32 len;
-};
-
-static int __security_secid_to_secctx(u32 secid, struct lsm_context *cp)
-{
-    return security_secid_to_secctx(secid, &cp->context, &cp->len);
-}
-static void __security_release_secctx(struct lsm_context *cp)
-{
-    security_release_secctx(cp->context, cp->len);
-}
-#else
-#define __security_secid_to_secctx security_secid_to_secctx
-#define __security_release_secctx security_release_secctx
-#endif
-
-#ifdef CONFIG_KSU_SUSFS
-#define KERNEL_PRIV_APP_DOMAIN "u:r:priv_app:s0:c512,c768"
-u32 susfs_priv_app_sid = 0; // compatible with simonpunk, why he don't use sid cache???
-u32 susfs_ksu_sid = 0;
 #endif
 
 /*
@@ -165,15 +180,24 @@ void cache_sid(void)
     // compatible with current susfs
     err = security_secctx_to_secid(KERNEL_PRIV_APP_DOMAIN, strlen(KERNEL_PRIV_APP_DOMAIN), &susfs_priv_app_sid);
     if (err) {
-        pr_warn("Failed to cache susfs_priv_app SID: %d\n", err);
+        pr_warn("Failed to cache susfs_priv_app SID: %d\n", susfs_priv_app_sid);
         susfs_priv_app_sid = 0;
     } else {
         pr_info("Cached susfs_priv_app SID: %u\n", susfs_priv_app_sid);
     }
 
     susfs_ksu_sid = cached_su_sid;
+    susfs_zygote_sid = cached_zygote_sid;
+    susfs_init_sid = cached_init_sid;
 #endif
 }
+
+#ifdef CONFIG_KSU_SUSFS
+// SuSFS Linker Stub: 
+// ReSukiSU already handles SID caching organically in cache_sid(). 
+// This stub prevents undefined symbol linker errors if SuSFS tries to call it manually.
+void susfs_set_batch_sid(void) {}
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
 static inline bool is_sid_match_tsec(const struct task_security_struct *tsec, u32 cached_sid,
@@ -224,6 +248,9 @@ static inline bool is_sid_match(const struct cred *cred, u32 cached_sid, const c
 
 bool is_task_ksu_domain(const struct cred *cred)
 {
+#ifdef CONFIG_KSU_SUSFS
+    if (is_sid_match(cred, susfs_ksu_sid, KERNEL_SU_CONTEXT)) return true;
+#endif
     return is_sid_match(cred, cached_su_sid, KERNEL_SU_CONTEXT);
 }
 
@@ -234,17 +261,21 @@ bool is_ksu_domain(void)
 
 bool is_zygote(const struct cred *cred)
 {
+#ifdef CONFIG_KSU_SUSFS
+    if (is_sid_match(cred, susfs_zygote_sid, ZYGOTE_CONTEXT)) return true;
+#endif
     return is_sid_match(cred, cached_zygote_sid, ZYGOTE_CONTEXT);
 }
 
 bool is_init(const struct cred *cred)
 {
+#ifdef CONFIG_KSU_SUSFS
+    if (is_sid_match(cred, susfs_init_sid, INIT_CONTEXT)) return true;
+#endif
     return is_sid_match(cred, cached_init_sid, INIT_CONTEXT);
 }
 
 #ifdef CONFIG_KSU_SUSFS
-#define KERNEL_PRIV_APP_DOMAIN "u:r:priv_app:s0:c512,c768"
-
 u32 susfs_get_sid_from_name(const char *secctx_name)
 {
     u32 out_sid = 0;
@@ -282,19 +313,3 @@ bool susfs_is_current_init_domain(void)
     return is_init(current_cred());
 }
 #endif // #ifdef CONFIG_KSU_SUSFS
-
-void escape_to_root_for_adb_root(void)
-{
-    struct cred *cred = prepare_creds();
-    if (!cred) {
-        pr_err("Failed to prepare adbd's creds!\n");
-        return;
-    }
-
-    if (transive_to_domain(KERNEL_SU_CONTEXT, cred, true)) {
-        pr_err("transive domain failed.\n");
-        abort_creds(cred);
-        return;
-    }
-    commit_creds(cred);
-}

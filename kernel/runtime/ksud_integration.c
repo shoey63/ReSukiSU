@@ -46,33 +46,42 @@
 #include "hook/syscall_hook.h"
 #endif
 
+#include "linux/jump_label.h"
+
+#ifdef CONFIG_KSU_SUSFS
+DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
+DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
+#endif
+
+DEFINE_STATIC_KEY_TRUE(is_init_second_stage_not_executed);
+DEFINE_STATIC_KEY_TRUE(is_first_zygote);
+
 // clang-format off
-static const char KERNEL_SU_RC[] = 
+static const char KERNEL_SU_RC[] =
     "\n"
 
     "on post-fs-data\n"
-    "	start logd\n"
+    "   start logd\n"
     // We should wait for the post-fs-data finish
-    "	exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
+    "   exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
     "\n"
 
     "on nonencrypted\n"
-    "	exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
+    "   exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
     "\n"
 
     "on property:vold.decrypt=trigger_restart_framework\n"
-    "	exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
+    "   exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
     "\n"
 
     "on property:sys.boot_completed=1\n"
-    "	exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
+    "   exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
     "\n"
 
     "\n";
 // clang-format on
 
 static void stop_init_rc_hook(void);
-static void stop_execve_hook(void);
 
 // clang-format off
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK)
@@ -96,9 +105,6 @@ static void stop_execve_hook(void);
         pr_info("unregister input kprobe: %d!\n", ret);
     }
 #elif defined(CONFIG_KSU_SUSFS)
-    DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
-    DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
-
     // use define to avoid ifdef
     #define ksu_init_rc_hook_inactive() (!static_branch_likely(&ksu_is_init_rc_hook_enabled))
     #define ksu_input_hook_inactive() (!static_branch_likely(&ksu_is_input_hook_enabled))
@@ -243,10 +249,10 @@ static bool check_argv(struct user_arg_ptr argv, int index, const char *expected
         goto fail;
 
     buf[buf_len - 1] = '\0';
+
     return !strcmp(buf, expected);
 
 fail:
-    pr_err("check_argv failed\n");
     return false;
 }
 
@@ -254,93 +260,86 @@ fail:
 void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, struct user_arg_ptr *envp, int *flags)
 {
     static const char app_process[] = "/system/bin/app_process";
-    static bool first_zygote = true;
-
     /* This applies to versions Android 10+ */
     static const char system_bin_init[] = "/system/bin/init";
     /* This applies to versions between Android 6 ~ 9  */
     static const char old_system_init[] = "/init";
-    static bool init_second_stage_executed = false;
 
     // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
-    if (unlikely(!memcmp(filename, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
-        // /system/bin/init executed
-        char buf[16];
-        if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
-            pr_info("/system/bin/init second_stage executed via argv1 check\n");
-            ksu_selinux_hide_handle_second_stage();
-            apply_kernelsu_rules();
-            cache_sid();
-            setup_ksu_cred();
-            init_second_stage_executed = true;
-        }
-    } else if (unlikely(!memcmp(filename, old_system_init, sizeof(old_system_init) - 1) && argv)) {
-        // /init executed
-        int argc = count(*argv, MAX_ARG_STRINGS);
-        pr_info("/init argc: %d\n", argc);
-        if (argc > 1 && !init_second_stage_executed) {
-            /* This applies to versions between Android 6 ~ 7 */
+    if (static_branch_unlikely(&is_init_second_stage_not_executed)) {
+        if (unlikely(!memcmp(filename, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
+            // /system/bin/init executed
             char buf[16];
-            if (!init_second_stage_executed && check_argv(*argv, 1, "--second-stage", buf, sizeof(buf))) {
-                pr_info("/init second_stage executed via argv1 check\n");
-
-                // This detect only happen in Android 10 +
-                // But still init it to avoid we should handle more case
+            if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
+                pr_info("/system/bin/init second_stage executed via argv1 check\n");
                 ksu_selinux_hide_handle_second_stage();
-
                 apply_kernelsu_rules();
                 cache_sid();
                 setup_ksu_cred();
-                init_second_stage_executed = true;
+                static_branch_disable(&is_init_second_stage_not_executed);
             }
-        } else if (argc == 1 && !init_second_stage_executed && envp) {
-            int envc = count(*envp, MAX_ARG_STRINGS);
-            if (envc > 0) {
-                int n;
-                for (n = 1; n <= envc; n++) {
-                    const char __user *p = get_user_arg_ptr(*envp, n);
-                    if (!p || IS_ERR(p)) {
-                        continue;
-                    }
-                    char env[256];
-                    // Reading environment variable strings from user space
-                    if (ksu_strncpy_from_user_nofault(env, p, sizeof(env)) < 0)
-                        continue;
-                    // Parsing environment variable names and values
-                    char *env_name = env;
-                    char *env_value = strchr(env, '=');
-                    if (env_value == NULL)
-                        continue;
-                    // Replace equal sign with string terminator
-                    *env_value = '\0';
-                    env_value++;
-                    // Check if the environment variable name and value are matching
-                    if (!strcmp(env_name, "INIT_SECOND_STAGE") &&
-                        (!strcmp(env_value, "1") || !strcmp(env_value, "true"))) {
-                        pr_info("/init second_stage executed via envp check\n");
-
-                        // This detect only happen in Android 10 +
-                        // But still init it to avoid we should handle more case
-                        ksu_selinux_hide_handle_second_stage();
-
-                        apply_kernelsu_rules();
-                        cache_sid();
-                        setup_ksu_cred();
-                        init_second_stage_executed = true;
-                        break;
+        } else if (unlikely(!memcmp(filename, old_system_init, sizeof(old_system_init) - 1) && argv)) {
+            // /init executed
+            int argc = count(*argv, MAX_ARG_STRINGS);
+            pr_info("/init argc: %d\n", argc);
+            if (argc > 1) {
+                /* This applies to versions between Android 6 ~ 7 */
+                char buf[16];
+                if (check_argv(*argv, 1, "--second-stage", buf, sizeof(buf))) {
+                    pr_info("/init second_stage executed via argv1 check\n");
+                    ksu_selinux_hide_handle_second_stage();
+                    apply_kernelsu_rules();
+                    cache_sid();
+                    setup_ksu_cred();
+                    static_branch_disable(&is_init_second_stage_not_executed);
+                }
+            } else if (argc == 1 && envp) {
+                int envc = count(*envp, MAX_ARG_STRINGS);
+                if (envc > 0) {
+                    int n;
+                    for (n = 1; n <= envc; n++) {
+                        const char __user *p = get_user_arg_ptr(*envp, n);
+                        if (!p || IS_ERR(p)) {
+                            continue;
+                        }
+                        char env[256];
+                        // Reading environment variable strings from user space
+                        if (ksu_strncpy_from_user_nofault(env, p, sizeof(env)) < 0)
+                            continue;
+                        // Parsing environment variable names and values
+                        char *env_name = env;
+                        char *env_value = strchr(env, '=');
+                        if (env_value == NULL)
+                            continue;
+                        // Replace equal sign with string terminator
+                        *env_value = '\0';
+                        env_value++;
+                        // Check if the environment variable name and value are matching
+                        if (!strcmp(env_name, "INIT_SECOND_STAGE") &&
+                            (!strcmp(env_value, "1") || !strcmp(env_value, "true"))) {
+                            pr_info("/init second_stage executed via envp check\n");
+                            ksu_selinux_hide_handle_second_stage();
+                            apply_kernelsu_rules();
+                            cache_sid();
+                            setup_ksu_cred();
+                            static_branch_disable(&is_init_second_stage_not_executed);
+                            break;
+                        }
                     }
                 }
             }
         }
     }
 
-    if (unlikely(first_zygote && !memcmp(filename, app_process, sizeof(app_process) - 1) && argv)) {
-        char buf[16];
-        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
-            pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
-            on_post_fs_data();
-            first_zygote = false;
-            ksu_stop_ksud_execve_hook();
+    if (static_branch_unlikely(&is_first_zygote)) {
+        if (unlikely(!memcmp(filename, app_process, sizeof(app_process) - 1) && argv)) {
+            char buf[16];
+            if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
+                pr_info("exec zygote, /data prepared, second_stage: %d\n", !static_key_enabled(&is_init_second_stage_not_executed));
+                on_post_fs_data();
+                static_branch_disable(&is_first_zygote);
+                ksu_stop_ksud_execve_hook();
+            }
         }
     }
 }
@@ -450,7 +449,6 @@ static void free_module_rc(void)
 // https://cs.android.com/android/platform/superproject/main/+/main:system/libbase/file.cpp;l=241-243;drc=61197364367c9e404c7da6900658f1b16c42d0da
 // The system will read init.rc file until EOF, whenever read() returns 0,
 // so we begin append ksu rc when we meet EOF.
-
 static ssize_t read_proxy(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
     ssize_t ret = 0;
@@ -727,7 +725,14 @@ void ksu_handle_initrc(struct file *file)
         return;
     }
     rc_hooked = true;
+#ifdef CONFIG_KSU_SUSFS
+    if (static_key_enabled(&ksu_is_init_rc_hook_enabled)) {
+        static_branch_disable(&ksu_is_init_rc_hook_enabled);
+        pr_info("ksu_init_rc_hook is disabled\n");
+    }
+#else
     stop_init_rc_hook();
+#endif
 
     // now we can sure that the init process is reading
     // `/init.rc` or `/system/etc/init/init.rc`
@@ -802,7 +807,14 @@ int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *v
             // key pressed, count it
             volumedown_pressed_count += 1;
             if (is_volumedown_enough(volumedown_pressed_count)) {
+#ifdef CONFIG_KSU_SUSFS
+                if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+                    static_branch_disable(&ksu_is_input_hook_enabled);
+                    pr_info("ksu_input_hook is disabled\n");
+                }
+#else
                 ksu_stop_input_hook_runtime();
+#endif
             }
         }
     }
@@ -831,8 +843,8 @@ static void vol_detector_event(struct input_handle *handle, unsigned int type, u
     // yeah this fucks up, seems unreg in the same context is an issue
     // but then again, tehres no need to unreg here, just let on_post_fs_data do it
     //if (volume_pressed_count >= 3) {
-    //	pr_info("KEY_VOLUMEDOWN pressed max times, safe mode detected!\n");
-    //	ksu_stop_input_hook_runtime();
+    //  pr_info("KEY_VOLUMEDOWN pressed max times, safe mode detected!\n");
+    //  ksu_stop_input_hook_runtime();
     //}
 }
 
@@ -935,7 +947,14 @@ bool ksu_is_safe_mode()
     }
 
     // stop hook first!
+#ifdef CONFIG_KSU_SUSFS
+    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+        static_branch_disable(&ksu_is_input_hook_enabled);
+        pr_info("ksu_input_hook is disabled\n");
+    }
+#else
     ksu_stop_input_hook_runtime();
+#endif
 
     pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
     if (is_volumedown_enough(volumedown_pressed_count)) {
@@ -975,14 +994,13 @@ void ksu_execve_hook_ksud(const struct pt_regs *regs)
     ksu_handle_execveat_ksud(path, &argv, NULL, NULL);
 }
 
+#ifndef CONFIG_KSU_SUSFS
 static long (*orig_sys_read)(const struct pt_regs *regs);
 static long ksu_sys_read(const struct pt_regs *regs)
 {
     unsigned int fd = PT_REGS_PARM1(regs);
-    char __user **buf_ptr = (char __user **)&PT_REGS_PARM2(regs);
-    size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
 
-    ksu_handle_sys_read(fd, buf_ptr, count_ptr);
+    ksu_handle_sys_read(fd, NULL, NULL);
     return orig_sys_read(regs);
 }
 
@@ -1054,6 +1072,7 @@ void ksu_stop_input_hook_runtime(void)
     input_hook_stopped = true;
     stop_input_hook();
 }
+#endif
 
 // ksud: module support
 void __init ksu_ksud_init(void)
@@ -1069,6 +1088,7 @@ void __init ksu_ksud_init(void)
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
 #endif
+
 #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
     vol_detector_init();
 #endif

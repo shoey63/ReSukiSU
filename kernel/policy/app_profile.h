@@ -13,6 +13,6 @@
 int escape_with_root_profile(void);
 
 void disable_seccomp(void);
-void escape_to_root_for_init(void);
+int escape_to_root_for_init(void);
 
 #endif

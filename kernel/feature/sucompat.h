@@ -2,29 +2,43 @@
 #define __KSU_H_SUCOMPAT
 #include <asm/ptrace.h>
 #include <linux/types.h>
+#include <linux/version.h>
+#include <linux/jump_label.h>
 #include "compat/kernel_compat.h"
 
-#ifdef KSU_COMPAT_USE_STATIC_KEY
 extern struct static_key_true ksu_su_compat_enabled;
-#else
-extern bool ksu_su_compat_enabled;
-#endif
 
 void ksu_sucompat_init(void);
 void ksu_sucompat_exit(void);
 
 // Handler functions exported for hook_manager
-int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && defined(CONFIG_KSU_SUSFS)
+#ifdef CONFIG_KSU_SUSFS
+int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+                         int *__unused_flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
 #else
 int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-#endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && defined(CONFIG_KSU_SUSFS)
+#endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+
+int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+            void *envp, int *flags);
+struct user_arg_ptr;
+int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *argv_user, struct user_arg_ptr *envp_user);
+#else
+int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags);
+int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#if defined(CONFIG_KPROBES)
+long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs);
+long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs);
+long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs);
+#endif
+#endif
 
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
 // WARNING! THERE HAVE TRYING TO CALL SYSCALL INTERNALLY
 // ENSURE CALL IT ONLY IN TRACEPOINT SYSCALL REDIRECT
-int ksu_handle_execve_sucompat_tp_internal(const char __user **filename_user, int orig_nr, const struct pt_regs *regs);
+int ksu_handle_execve_sucompat_tp_internal(const char __user **filename_user, int orig_nr, struct pt_regs *regs);
 #else // #ifndef CONFIG_KSU_TRACEPOINT_HOOK
 
 // 63 already used as TIF_KSU_DISABLE_ESCAPE_WITH_ROOT (64bit)

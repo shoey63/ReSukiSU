@@ -1,10 +1,10 @@
-#include "feature/selinux_hide.h"
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/printk.h>
 #include <linux/version.h>
 
+#include "feature/selinux_hide.h"
 #include "policy/allowlist.h"
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud_boot.h"
@@ -28,7 +28,6 @@ void on_post_fs_data(void)
     ksu_load_allow_list();
     ksu_observer_init();
     // sanity check, this may influence the performance
-    ksu_stop_input_hook_runtime();
     ksu_selinux_hide_handle_post_fs_data();
 
     // scan manager

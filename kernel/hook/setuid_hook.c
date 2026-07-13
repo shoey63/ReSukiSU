@@ -2,6 +2,7 @@
 #include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/thread_info.h>
+#include <linux/cred.h>
 #include <linux/seccomp.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -14,7 +15,11 @@
 #include <linux/uidgid.h>
 #include <linux/namei.h>
 
-#include "policy/app_profile.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include "selinux/selinux.h"
+#endif
+
 #include "policy/allowlist.h"
 #include "hook/setuid_hook.h"
 #include "klog.h" // IWYU pragma: keep
@@ -27,6 +32,9 @@
 #include "compat/kernel_compat.h"
 #include "feature/kernel_umount.h"
 #include "feature/sucompat.h"
+
+extern void disable_seccomp(void);
+extern struct cred *ksu_cred;
 
 static inline void ksu_set_file_immutable(const char *path_name, bool immutable)
 {
@@ -58,7 +66,6 @@ static inline void ksu_set_file_immutable(const char *path_name, bool immutable)
         inode->i_flags &= ~S_IMMUTABLE;
     }
     inode_unlock(inode);
-
     mnt_drop_write(path.mnt);
     path_put(&path);
 }
@@ -76,6 +83,62 @@ static inline void ksu_set_ksud_status(uid_t new_uid)
     }
 }
 
+#ifdef CONFIG_KSU_SUSFS
+extern u32 susfs_zygote_sid;
+extern struct work_struct susfs_extra_works;
+
+static inline void ksu_handle_extra_susfs_work(void)
+{
+    if (work_pending(&susfs_extra_works))
+        return;
+
+    schedule_work(&susfs_extra_works);
+}
+
+int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+{
+    // We only interest in process spwaned by zygote
+    if (!susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
+        return 0;
+
+    // Check if spawned process is isolated service first, and force to do umount if so
+    if (is_isolated_process(ruid))
+        goto do_umount;
+
+    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
+        disable_seccomp();
+        ksu_set_ksud_status(ruid);
+
+        pr_info("install fd for manager: %d\n", ruid);
+        ksu_install_fd();
+        return 0;
+    }
+
+    // we should not umount for webview zygote
+    if (unlikely(ruid == WEBVIEW_ZYGOTE_UID))
+        return 0;
+
+    // Check if spawned process is normal user app and needs to be umounted
+    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid)))
+        goto do_umount;
+
+    if (ksu_is_allow_uid_for_current(ruid))
+        disable_seccomp();
+
+    return 0;
+
+do_umount:
+    // Handle kernel umount
+    ksu_handle_umount(current_uid().val, ruid);
+
+    // Handle extra susfs work
+    ksu_handle_extra_susfs_work();
+
+    // Mark current proc as umounted
+    susfs_set_current_proc_umounted();
+    return 0;
+}
+#else
 int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
 {
     // We are only interested in processes spawned by zygote.
@@ -158,6 +221,7 @@ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
     return ksu_handle_setuid(ruid, ksu_get_uid_t(current_uid()));
 #endif
 }
+#endif // CONFIG_KSU_SUSFS
 
 void __init ksu_setuid_hook_init(void)
 {

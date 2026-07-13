@@ -39,7 +39,7 @@ ifdef CONFIG_ARM64
 kernelsu-objs += compat/apatch_conflict.o
 endif
 
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes 
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes
 ccflags-y += $(call cc-disable-warning, int-conversion)
 ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable -Wno-missing-braces
 ccflags-y += -Wno-int-to-pointer-cast -Wno-declaration-after-statement
@@ -60,12 +60,12 @@ KSU_SRC := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 LOCAL_GIT_EXISTS := $(shell test -e $(KSU_SRC)/../.git && echo 1 || echo 0)
 
-ifeq ($(LOCAL_GIT_EXISTS),0)
-$(info -- Can't find $(REPO_NAME) git submodule!)
-$(info -- If you are using bazel to build this kernel,)
-$(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
-$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
-endif
+#ifeq ($(LOCAL_GIT_EXISTS),0)
+#$(info -- Can't find $(REPO_NAME) git submodule!)
+#$(info -- If you are using bazel to build this kernel,)
+#$(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
+#$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
+#endif
 
 ifdef KBUILD_EXTMOD
 include $(KSU_SRC)/tools/ddk_compatible.mk
@@ -234,6 +234,18 @@ endif
 ifdef KSU_MANAGER_PACKAGE
 ccflags-y += -DKSU_MANAGER_PACKAGE=\"$(KSU_MANAGER_PACKAGE)\"
 $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
+endif
+
+## For susfs stuff ##
+ifeq ($(strip $(CONFIG_KSU_SUSFS)),y)
+ifeq ($(shell test -e $(srctree)/fs/susfs.c; echo $$?),0)
+$(eval SUSFS_VERSION=$(shell cat $(srctree)/include/linux/susfs.h | grep -E '^#define SUSFS_VERSION' | cut -d' ' -f3 | sed 's/"//g'))
+$(info )
+$(info -- SUSFS_VERSION: $(SUSFS_VERSION))
+else
+$(info -- You have not integrated susfs in your kernel yet.)
+$(info -- Read: https://gitlab.com/simonpunk/susfs4ksu)
+endif
 endif
 
 # Keep a new line here!! Because someone may append config

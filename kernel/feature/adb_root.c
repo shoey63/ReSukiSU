@@ -8,9 +8,15 @@
 #include <linux/ptrace.h>
 #include <linux/static_key.h>
 #include <linux/slab.h>
+#include <linux/sched/task_stack.h>
+
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#endif
 
 #include "adb_root.h"
 #include "arch.h"
+#include "policy/app_profile.h"
 #include "policy/feature.h"
 #include "selinux/selinux.h"
 #ifndef CONFIG_KSU_TRACEPOINT_HOOK
@@ -29,6 +35,16 @@ bool ksu_adb_root __read_mostly = false;
 static const char kAdbd[] = "/adbd";
 static const size_t kAdbdLen = sizeof(kAdbd) - 1;
 
+#ifdef CONFIG_KSU_SUSFS
+static inline long is_exec_adbd(const char *filename)
+{
+    if (strstr(filename, "adbd"))
+        pr_info("is_exec_adbd() => filename: %s\n", filename);
+
+    return (susfs_starts_with(filename, "/apex/") &&
+                susfs_ends_with(filename, "/adbd"));
+}
+#else
 static inline long is_exec_adbd(const char *filename)
 {
     size_t len = strlen(filename);
@@ -39,6 +55,7 @@ static inline long is_exec_adbd(const char *filename)
 
     return 1;
 }
+#endif
 
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
 static long is_exec_adbd_tracepoint(struct pt_regs *regs)
@@ -64,7 +81,7 @@ static long is_exec_adbd_tracepoint(struct pt_regs *regs)
 }
 #endif
 
-static long is_libadbroot_ok()
+static long is_libadbroot_ok(void)
 {
     static const char kLibAdbRoot[] = "/data/adb/ksu/lib/libadbroot.so";
     struct path path;
@@ -106,7 +123,6 @@ static long setup_ld_preload(void ***envp_arg)
     envp = (unsigned long)untagged_addr((unsigned long)*envp_p);
 
     ld_preload_p = stackp = ALIGN_DOWN(stackp - sizeof(kLdPreload), 8);
-
     ret = copy_to_user((void __user *)ld_preload_p, kLdPreload, sizeof(kLdPreload));
     if (ret != 0) {
         pr_warn("write ld_preload when adb_root_handle_execve failed: %ld\n", ret);
@@ -114,7 +130,6 @@ static long setup_ld_preload(void ***envp_arg)
     }
 
     ld_library_path_p = stackp = ALIGN_DOWN(stackp - sizeof(kLdLibraryPath), 8);
-
     ret = copy_to_user((void __user *)ld_library_path_p, kLdLibraryPath, sizeof(kLdLibraryPath));
     if (ret != 0) {
         pr_warn("write ld_library_path when adb_root_handle_execve failed: %ld\n", ret);
@@ -170,7 +185,6 @@ static long setup_ld_preload(void ***envp_arg)
     total_size = env_count * kPtrSize;
 
     stackp -= total_size;
-
     ret = copy_to_user((void __user *)stackp, tmp_env_p, total_size);
     if (ret != 0) {
         pr_err("copy new env failed: %ld\n", ret);
@@ -195,7 +209,7 @@ static long setup_ld_preload_tracepoint(struct pt_regs *regs)
     return setup_ld_preload((void ***)&PT_REGS_PARM3(regs));
 }
 
-static long do_ksu_adb_root_handle_execve(struct pt_regs *regs)
+static long do_ksu_adb_root_handle_execve_tracepoint(struct pt_regs *regs)
 {
     if (likely(is_exec_adbd_tracepoint(regs) != 1)) {
         return 0;
@@ -212,6 +226,13 @@ static long do_ksu_adb_root_handle_execve(struct pt_regs *regs)
 
     pr_info("escape to root for adb\n");
     escape_to_root_for_adb_root();
+
+#ifdef CONFIG_KSU_SUSFS
+    ret = (long)escape_with_root_profile();
+    if (ret)
+        pr_err("escape_with_root_profile() failed: %d\n", (int)ret);
+#endif
+
     return 0;
 }
 
@@ -220,7 +241,7 @@ long ksu_adb_root_handle_execve_tracepoint(struct pt_regs *regs)
     // Tracepoint Syscall Redirect hook always in GKI2
     // So there no need to check for modern static key interface
     if (static_branch_unlikely(&ksu_adb_root)) {
-        return do_ksu_adb_root_handle_execve(regs);
+        return do_ksu_adb_root_handle_execve_tracepoint(regs);
     }
     return 0;
 }
@@ -242,6 +263,13 @@ static long do_ksu_adb_root_handle_execve(const char *filename, struct user_arg_
 
     pr_info("escape to root for adb\n");
     escape_to_root_for_adb_root();
+
+#ifdef CONFIG_KSU_SUSFS
+    ret = (long)escape_with_root_profile();
+    if (ret)
+        pr_err("escape_with_root_profile() failed: %d\n", (int)ret);
+#endif
+
     return 0;
 }
 

@@ -9,6 +9,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/utsname.h> // Added for C99 compliance
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/namei.h>
@@ -20,6 +21,14 @@
 #include "supercall/internal.h"
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
+#include "manager/manager_identity.h"
+#include "sulog/event.h"
+#include "linux/jump_label.h"
+
+#if defined(CONFIG_KSU_SUSFS) && defined(CONFIG_KSU_SUSFS_SPOOF_UNAME)
+extern struct static_key_false susfs_is_uname_spoof_buffer_set;
+#endif
+uint32_t ksuver_override = 0;
 
 static int anon_ksu_release(struct inode *inode, struct file *filp)
 {
@@ -128,15 +137,35 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
     return 0;
 }
 
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
-// Reboot hook for installing fd
+// SuSFS Linker Stub: 
+// ReSukiSU natively handles toolkit spoofing elsewhere. We provide this safe stub 
+// so SuSFS does not fail at the linking stage when attempting its dead-man's switch.
+static char toolkit_orig_release[65] = {0};
+static char toolkit_orig_version[65] = {0};
+
+void ksu_toolkit_uname_reset(void)
+{
+    if (toolkit_orig_release[0] != '\0') {
+        struct new_utsname *u = utsname();
+        pr_info("ksu: resetting toolkit uname memory to stock\n");
+        down_write(&uts_sem);
+        strscpy(u->release, toolkit_orig_release, sizeof(u->release));
+        strscpy(u->version, toolkit_orig_version, sizeof(u->version));
+        up_write(&uts_sem);
+    }
+}
+
+#ifndef CONFIG_KSU_SUSFS
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     struct pt_regs *real_regs = PT_REAL_REGS(regs);
     int magic1 = (int)PT_REGS_PARM1(real_regs);
     int magic2 = (int)PT_REGS_PARM2(real_regs);
-    int cmd = (int)PT_REGS_PARM3(real_regs);
-    void __user **arg = (void __user **)&PT_REGS_SYSCALL_PARM4(real_regs);
+    unsigned int cmd = (unsigned int)PT_REGS_PARM3(real_regs);
+    
+    // Safely cast the pointer address for C99 compliance
+    unsigned long arg4 = (unsigned long)PT_REGS_SYSCALL_PARM4(real_regs);
+    void __user **arg = (void __user **)arg4;
 
     ksu_handle_sys_reboot(magic1, magic2, cmd, arg);
     return 0;
@@ -150,11 +179,13 @@ static struct kprobe reboot_kp = {
 
 void __init ksu_supercalls_init(void)
 {
+#ifndef CONFIG_KSU_SUSFS
     int rc;
+#endif
 
     ksu_supercall_dump_commands();
 
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifndef CONFIG_KSU_SUSFS
     rc = register_kprobe(&reboot_kp);
     if (rc) {
         pr_err("reboot kprobe failed: %d\n", rc);
@@ -166,7 +197,7 @@ void __init ksu_supercalls_init(void)
 
 void __exit ksu_supercalls_exit(void)
 {
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+#ifndef CONFIG_KSU_SUSFS
     unregister_kprobe(&reboot_kp);
 #endif
     ksu_supercall_cleanup_state();
