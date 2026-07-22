@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::android::susfs::{
     api::{
         magic::{CMD_SUSFS_SET_UNAME, ERR_CMD_NOT_SUPPORTED, NEW_UTS_LEN},
-        susfsctl::{communicate, parse_err},
+        susfsctl::{parse_err, susfsctl},
     },
     utils::str_to_c_array,
 };
@@ -35,6 +35,6 @@ pub fn set_uname(release: &str, version: &str) -> Result<()> {
     str_to_c_array(version, &mut info.version);
     info.err = ERR_CMD_NOT_SUPPORTED;
 
-    communicate(CMD_SUSFS_SET_UNAME, &mut info);
+    susfsctl(CMD_SUSFS_SET_UNAME, &mut info);
     parse_err(CMD_SUSFS_SET_UNAME, info.err)
 }
