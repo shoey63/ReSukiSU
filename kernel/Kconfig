@@ -80,13 +80,14 @@ config KSU_MULTI_MANAGER_SUPPORT
 choice
 	prompt "KernelSU Hooking Method"
 	depends on KSU
-	default KSU_TRACEPOINT_HOOK
+	default KSU_SUSFS
 	help
 	  Select the hooking method for KernelSU.
 	  Note: Tracepoint Syscall Redirect hook is only supported for GKI2(5.10+)
 
 config KSU_TRACEPOINT_HOOK
 	bool "Tracepoint Syscall Redirect"
+		depends on n
 	help
 	  The standard, upstream method for modern kernels. 
 	  Utilizes GKI tracepoints for syscall redirection. 
@@ -95,7 +96,7 @@ config KSU_TRACEPOINT_HOOK
 
 config KSU_MANUAL_HOOK
 	bool "Manually hook KernelSU"
-	depends on KSU != m
+	depends on n
 	help
 	  If enabled, it hooks the required KernelSU syscalls 
 	  with a manually-patched function.
